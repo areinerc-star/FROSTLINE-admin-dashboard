@@ -1,0 +1,46 @@
+rules_version = '2';
+
+// FROSTLINE — Storage security rules
+// -------------------------------------
+// Client form has no login, so clients must be able to UPLOAD inspiration,
+// logo, and masterlist files without authenticating. Uploads are restricted
+// by type and size only (10 MB, images/PDF for inspo & logo; images/PDF/
+// CSV/Excel for the masterlist).
+//
+// IMPORTANT — no admin sign-in: like firestore.rules, read access below is
+// public (`allow read: if true`) because the admin dashboard has no login
+// and needs to fetch/display these files. Anyone with a file's path — which
+// is unguessable but not secret — can read it. If these files may contain
+// confidential client material, protect the /admin route itself (see the
+// note in firestore.rules) rather than relying on obscurity here, or swap
+// back to `request.auth != null` after reintroducing Firebase Authentication.
+
+function isAllowedMediaType() {
+  return request.resource.contentType.matches('image/(png|jpeg|webp)')
+    || request.resource.contentType == 'application/pdf';
+}
+
+function isAllowedMasterlistType() {
+  return isAllowedMediaType()
+    || request.resource.contentType == 'text/csv'
+    || request.resource.contentType == 'application/vnd.ms-excel'
+    || request.resource.contentType == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+}
+
+function isAllowedSize() {
+  return request.resource.size <= 10 * 1024 * 1024;
+}
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Covers inspo-uploads/{submissionId}/inspo|logo|masterlist/{fileName}.
+    // The masterlist group gets the wider type allowlist (CSV/Excel); the
+    // other two groups stick to images and PDFs.
+    match /inspo-uploads/{submissionId}/{group}/{fileName} {
+      allow write: if (group == 'masterlist' ? isAllowedMasterlistType() : isAllowedMediaType())
+        && isAllowedSize();
+      allow read: if true;
+      allow delete: if false;
+    }
+  }
+}
