@@ -1,0 +1,102 @@
+rules_version = '2';
+
+// FROSTLINE — Firestore security rules
+// --------------------------------------
+// The admin dashboard requires a real Firebase Authentication sign-in
+// (see admin-dashboard/index.html + script.js). These rules enforce that
+// server-side too — a signed-out request gets the same "permission denied"
+// whether it comes from the dashboard's own UI or a direct API call, so the
+// UI gate isn't the only thing standing between this data and the internet.
+//
+// What each rule below allows:
+//   - Anyone can CREATE a submission (required — the client form has no
+//     login by design), tightly validated below.
+//   - Anyone can fill in a submission's attachment metadata right after
+//     creating it (the second write the client form makes, once uploads
+//     finish) — still unauthenticated, since that's still the public form's
+//     own flow, not an admin action.
+//   - Only a signed-in user can READ submissions, change a submission's
+//     STATUS, or DELETE a submission and its files.
+//
+// To make someone an admin: Firebase Console → Authentication → Users →
+// Add user (email + password). That's it — any signed-in user in this
+// project can use the dashboard. For per-user permission levels beyond
+// "signed in or not," switch to custom claims and check
+// request.auth.token.someClaim instead of just isSignedIn() below.
+//
+// NOTE ON FILES: with USE_FIREBASE_STORAGE left off in firebase-config.js
+// (the default — avoids requiring the paid Blaze plan), uploaded files are
+// stored as base64 data in a `files` subcollection under each submission
+// instead of in Cloud Storage. The rules for that subcollection are near
+// the bottom of this file.
+
+function isSignedIn() {
+  return request.auth != null;
+}
+
+function isValidNewSubmission(data) {
+  return data.keys().hasAll(['teamName', 'whatToDesign', 'status', 'createdAt', 'updatedAt'])
+    && data.teamName is string && data.teamName.size() > 0 && data.teamName.size() <= 200
+    && data.whatToDesign is list && data.whatToDesign.size() > 0
+    && (!('totalPieces' in data) || data.totalPieces is int)
+    && (!('deadline' in data) || data.deadline is string)
+    && (!('designInspo' in data) || (data.designInspo is string && data.designInspo.size() <= 5000))
+    && (!('additionalNotes' in data) || (data.additionalNotes is string && data.additionalNotes.size() <= 5000))
+    && data.status == 'new'
+    // Attachment arrays are populated by a follow-up update once uploads
+    // finish, so on create they just need to be lists if present at all.
+    && (!('inspoAttachments' in data) || data.inspoAttachments is list)
+    && (!('logoAttachments' in data) || data.logoAttachments is list)
+    && (!('masterlistAttachments' in data) || data.masterlistAttachments is list);
+}
+
+function isValidStatusUpdate(before, after) {
+  // Admins may only change status/updatedAt — not rewrite the client's
+  // original submission content.
+  return after.diff(before).affectedKeys().hasOnly(['status', 'updatedAt'])
+    && after.status in ['new', 'in_review', 'completed'];
+}
+
+function isValidAttachmentFill(before, after) {
+  // The public create flow writes the doc first, then fills in attachment
+  // metadata once uploads finish. This lets that second write through
+  // without otherwise opening the door to arbitrary public edits — and
+  // without requiring the client form (which has no login) to authenticate.
+  return after.diff(before).affectedKeys().hasOnly(
+    ['inspoAttachments', 'logoAttachments', 'masterlistAttachments']
+  )
+    && after.inspoAttachments is list
+    && after.logoAttachments is list
+    && after.masterlistAttachments is list;
+}
+
+function isValidFileDoc(data) {
+  // ~700KB cap on the base64 payload matches FIRESTORE_FILE_BYTE_BUDGET in
+  // shared/data-store.js — keep these in sync if you change one.
+  return data.keys().hasAll(['group', 'name', 'type', 'size', 'dataUrl', 'createdAt'])
+    && data.group in ['inspo', 'logo', 'masterlist']
+    && data.name is string && data.name.size() > 0 && data.name.size() <= 300
+    && data.type is string
+    && data.size is int
+    && data.dataUrl is string && data.dataUrl.size() <= 950000;
+}
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /submissions/{submissionId} {
+      allow create: if isValidNewSubmission(request.resource.data);
+      allow read: if isSignedIn();
+      allow update: if isValidAttachmentFill(resource.data, request.resource.data)
+        || (isSignedIn() && isValidStatusUpdate(resource.data, request.resource.data));
+      allow delete: if isSignedIn();
+
+      match /files/{fileId} {
+        allow create: if isValidFileDoc(request.resource.data);
+        allow read: if isSignedIn();
+        allow update: if false;
+        allow delete: if isSignedIn();
+      }
+    }
+  }
+}

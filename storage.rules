@@ -1,0 +1,52 @@
+rules_version = '2';
+
+// FROSTLINE — Storage security rules
+// -------------------------------------
+// NOT CURRENTLY USED. By default (USE_FIREBASE_STORAGE = false in
+// shared/firebase-config.js), files are stored inline in Firestore instead
+// of Cloud Storage, to avoid requiring the paid Blaze plan — see
+// firestore.rules for the rules that actually apply right now.
+//
+// Keep this file around for if/when you upgrade to Blaze and flip
+// USE_FIREBASE_STORAGE to true. At that point, deploy these rules too
+// (`firebase deploy --only storage:rules`) and files go back to having no
+// practical size limit instead of the ~500KB-per-file Firestore cap.
+//
+// Client form has no login, so clients must be able to UPLOAD inspiration,
+// logo, and masterlist files without authenticating. Uploads are restricted
+// by type and size only (10 MB, images/PDF for inspo & logo; images/PDF/
+// CSV/Excel for the masterlist).
+//
+// IMPORTANT: the admin dashboard now requires real Firebase Authentication
+// sign-in (see firestore.rules for the full explanation). Read access below
+// mirrors that — only a signed-in user can read/download a file.
+
+function isAllowedMediaType() {
+  return request.resource.contentType.matches('image/(png|jpeg|webp)')
+    || request.resource.contentType == 'application/pdf';
+}
+
+function isAllowedMasterlistType() {
+  return isAllowedMediaType()
+    || request.resource.contentType == 'text/csv'
+    || request.resource.contentType == 'application/vnd.ms-excel'
+    || request.resource.contentType == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+}
+
+function isAllowedSize() {
+  return request.resource.size <= 10 * 1024 * 1024;
+}
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Covers inspo-uploads/{submissionId}/inspo|logo|masterlist/{fileName}.
+    // The masterlist group gets the wider type allowlist (CSV/Excel); the
+    // other two groups stick to images and PDFs.
+    match /inspo-uploads/{submissionId}/{group}/{fileName} {
+      allow write: if (group == 'masterlist' ? isAllowedMasterlistType() : isAllowedMediaType())
+        && isAllowedSize();
+      allow read: if request.auth != null;
+      allow delete: if request.auth != null;
+    }
+  }
+}
